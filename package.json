@@ -1,0 +1,35 @@
+{
+  "name": "com.ugc.infinitescrollview",
+  "version": "1.0.0",
+  "displayName": "UGC.InfiniteScrollView",
+  "description": "A high-performance infinite scroll view component for Unity UI, optimized for large datasets with object pooling and viewport culling.",
+  "unity": "2021.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/unity-game-framework/UGC.InfiniteScrollView",
+  "changelogUrl": "https://github.com/unity-game-framework/UGC.InfiniteScrollView/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/unity-game-framework/UGC.InfiniteScrollView/blob/main/LICENSE.md",
+  "keywords": [
+    "ui",
+    "scrollview",
+    "infinite",
+    "performance",
+    "ugc",
+    "list",
+    "virtualization"
+  ],
+  "author": {
+    "name": "UGC",
+    "email": "support@ugc.com",
+    "url": "https://github.com/unity-game-component"
+  },
+  "dependencies": {
+    "com.unity.ugui": "1.0.0"
+  },
+  "samples": [
+    {
+      "displayName": "Simple List Demo",
+      "description": "Basic usage examples of infinite scroll view",
+      "path": "Samples~/SimpleListDemo"
+    }
+  ]
+}
