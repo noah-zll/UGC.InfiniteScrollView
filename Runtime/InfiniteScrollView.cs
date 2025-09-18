@@ -312,6 +312,11 @@ namespace UGC.InfiniteScrollView
         /// 可见范围改变时触发
         /// </summary>
         public event Action<int, int> OnVisibleRangeChanged;
+
+        /// <summary>
+        /// 自定义操作事件
+        /// </summary>
+        public event Action<string, object> OnCustomAction;
         
         #endregion
         
@@ -420,7 +425,7 @@ namespace UGC.InfiniteScrollView
         /// 设置数据源
         /// </summary>
         /// <param name="data">数据列表</param>
-        public void SetData<T>(List<T> data) where T : class
+        public void SetData<T>(List<T> data)
         {
             dataSource.Clear();
             
@@ -440,7 +445,7 @@ namespace UGC.InfiniteScrollView
         /// 添加数据项
         /// </summary>
         /// <param name="data">数据对象</param>
-        public void AddItem<T>(T data) where T : class
+        public void AddItem<T>(T data)
         {
             dataSource.Add(new ScrollViewItemData
             {
@@ -456,7 +461,7 @@ namespace UGC.InfiniteScrollView
         /// </summary>
         /// <param name="index">插入位置</param>
         /// <param name="data">数据对象</param>
-        public void InsertItem<T>(int index, T data) where T : class
+        public void InsertItem<T>(int index, T data)
         {
             if (index < 0 || index > dataSource.Count)
                 return;
@@ -653,6 +658,11 @@ namespace UGC.InfiniteScrollView
         public bool IsItemSelected(int index)
         {
             return stateManager?.IsItemSelected(index) ?? false;
+        }
+
+        public void OnAction(string action, object data)
+        {
+            OnCustomAction?.Invoke(action, data);
         }
         
         /// <summary>
