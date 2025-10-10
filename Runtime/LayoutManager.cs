@@ -125,7 +125,7 @@ namespace UGC.InfiniteScrollView
             
             for (int i = 0; i < layoutInfos.Count; i++)
             {
-                Rect itemRect = new Rect(layoutInfos[i].position, layoutInfos[i].size);
+                Rect itemRect = layoutInfos[i].bounds;
                 
                 if (viewportRect.Overlaps(itemRect))
                 {
@@ -507,6 +507,6 @@ namespace UGC.InfiniteScrollView
         public int index;
         public Vector2 position;
         public Vector2 size;
-        public Rect bounds => new Rect(position, size);
+        public Rect bounds => new Rect(new Vector2(position.x, position.y - size.y), size);
     }
 }
