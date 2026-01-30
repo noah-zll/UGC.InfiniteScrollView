@@ -185,23 +185,30 @@ namespace UGC.InfiniteScrollView
         protected virtual Vector2 GetItemPreferredSize(int index)
         {
             // 尝试从itemPrefab获取首选大小
-            if (scrollView != null && scrollView.ItemPrefab != null)
+            if (scrollView != null)
             {
-                // 首先尝试从预制体的RectTransform获取原始大小
-                var prefabRect = scrollView.ItemPrefab.GetComponent<RectTransform>();
-                if (prefabRect != null && prefabRect.sizeDelta != Vector2.zero)
+                // 获取当前索引的类型和对应预制体
+                int type = scrollView.OnGetItemType?.Invoke(index) ?? 0;
+                GameObject prefab = scrollView.GetPrefab(type);
+
+                if (prefab != null)
                 {
-                    return prefabRect.sizeDelta;
-                }
-                
-                // 如果预制体大小为零，再尝试从IScrollViewItem接口获取
-                var itemComponent = scrollView.ItemPrefab.GetComponent<IScrollViewItem>();
-                if (itemComponent != null)
-                {
-                    Vector2 preferredSize = itemComponent.GetPreferredSize();
-                    if (preferredSize != Vector2.zero)
+                    // 首先尝试从预制体的RectTransform获取原始大小
+                    var prefabRect = prefab.GetComponent<RectTransform>();
+                    if (prefabRect != null && prefabRect.sizeDelta != Vector2.zero)
                     {
-                        return preferredSize;
+                        return prefabRect.sizeDelta;
+                    }
+                    
+                    // 如果预制体大小为零，再尝试从IScrollViewItem接口获取
+                    var itemComponent = prefab.GetComponent<IScrollViewItem>();
+                    if (itemComponent != null)
+                    {
+                        Vector2 preferredSize = itemComponent.GetPreferredSize();
+                        if (preferredSize != Vector2.zero)
+                        {
+                            return preferredSize;
+                        }
                     }
                 }
             }

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -43,6 +44,12 @@ namespace UGC.InfiniteScrollView
         /// 列表项预制体，必须包含实现了IScrollViewItem接口的组件
         /// </summary>
         [SerializeField] private GameObject itemPrefab;
+
+        /// <summary>
+        /// 额外的列表项预制体，用于多样式支持（如分组标题）
+        /// 索引对应 OnGetItemType 返回的类型值减 1
+        /// </summary>
+        [SerializeField] private List<GameObject> extraPrefabs = new List<GameObject>();
 
         /// <summary>
         /// 对象池大小，建议设置为可见项数的1.5-2倍
@@ -168,9 +175,15 @@ namespace UGC.InfiniteScrollView
         private RectTransform content;
         private RectTransform viewport;
 
-        private ObjectPool<GameObject> itemPool;
+        private Dictionary<int, ObjectPool<GameObject>> itemPools;
         private List<ScrollViewItemData> dataSource = new List<ScrollViewItemData>();
         internal Dictionary<int, GameObject> activeItems = new Dictionary<int, GameObject>();
+
+        /// <summary>
+        /// 获取指定索引的列表项类型回调
+        /// 返回值：0为默认itemPrefab，1+为extraPrefabs[index-1]
+        /// </summary>
+        public Func<int, int> OnGetItemType;
 
         private LayoutManager layoutManager;
         private ItemStateManager stateManager;
@@ -233,12 +246,42 @@ namespace UGC.InfiniteScrollView
         /// <summary>
         /// 当前对象池大小
         /// </summary>
-        public int CurrentPoolSize => itemPool?.Count ?? 0;
+        public int CurrentPoolSize
+        {
+            get
+            {
+                int total = 0;
+                if (itemPools != null)
+                {
+                    foreach (var pool in itemPools.Values)
+                    {
+                        total += pool.Count;
+                    }
+                }
+                return total;
+            }
+        }
 
         /// <summary>
-        /// 列表项预制体
+        /// 获取列表项预制体
         /// </summary>
         public GameObject ItemPrefab => itemPrefab;
+
+        /// <summary>
+        /// 根据类型获取预制体
+        /// </summary>
+        /// <param name="type">预制体类型</param>
+        /// <returns>预制体对象</returns>
+        public GameObject GetPrefab(int type)
+        {
+            if (type == 0) return itemPrefab;
+            int extraIndex = type - 1;
+            if (extraIndex >= 0 && extraIndex < extraPrefabs.Count)
+            {
+                return extraPrefabs[extraIndex];
+            }
+            return itemPrefab;
+        }
 
         /// <summary>
         /// 网格布局的单元格大小
@@ -401,8 +444,25 @@ namespace UGC.InfiniteScrollView
                 return;
             }
 
-            itemPool = new ObjectPool<GameObject>(
-                () => CreatePoolItem(),
+            itemPools = new Dictionary<int, ObjectPool<GameObject>>();
+
+            // 初始化默认对象池 (Type 0)
+            itemPools[0] = CreatePoolForType(0, itemPrefab);
+
+            // 初始化额外对象池 (Type 1..)
+            for (int i = 0; i < extraPrefabs.Count; i++)
+            {
+                if (extraPrefabs[i] != null)
+                {
+                    itemPools[i + 1] = CreatePoolForType(i + 1, extraPrefabs[i]);
+                }
+            }
+        }
+
+        private ObjectPool<GameObject> CreatePoolForType(int type, GameObject prefab)
+        {
+            return new ObjectPool<GameObject>(
+                () => CreatePoolItem(type, prefab),
                 item => OnItemReturned(item),
                 item => OnItemBorrowed(item),
                 poolSize
@@ -427,6 +487,9 @@ namespace UGC.InfiniteScrollView
         /// <param name="data">数据列表</param>
         public void SetData<T>(List<T> data)
         {
+            // 清理旧数据和状态，确保视图完全刷新
+            ClearAllItems();
+
             dataSource.Clear();
 
             for (int i = 0; i < data.Count; i++)
@@ -479,6 +542,149 @@ namespace UGC.InfiniteScrollView
             }
 
             RefreshLayout();
+        }
+
+        /// <summary>
+        /// 批量插入数据项
+        /// </summary>
+        /// <param name="index">插入位置</param>
+        /// <param name="items">数据列表</param>
+        public void InsertItems<T>(int index, IEnumerable<T> items)
+        {
+            if (index < 0 || index > dataSource.Count || items == null)
+                return;
+
+            int count = 0;
+            foreach (var item in items)
+            {
+                dataSource.Insert(index + count, new ScrollViewItemData
+                {
+                    Index = index + count,
+                    Data = item
+                });
+                count++;
+            }
+
+            if (count > 0)
+            {
+                // 标记开始批量处理
+                isBatchProcessing = true;
+                batchInsertIndex = index;
+                batchInsertCount = count;
+
+                // 调整 activeItems 的 Key 以匹配新索引
+                // 从后往前遍历，避免覆盖
+                var keysToMove = activeItems.Keys.Where(k => k >= index).OrderByDescending(k => k).ToList();
+                foreach (var oldKey in keysToMove)
+                {
+                    var item = activeItems[oldKey];
+                    activeItems.Remove(oldKey);
+                    activeItems.Add(oldKey + count, item);
+
+                    // 更新 Item 组件的索引
+                    var scrollItem = item.GetComponent<ScrollViewItemBase>();
+                    if (scrollItem != null)
+                    {
+                        // 获取对应的数据对象
+                        // 注意：dataSource 已经包含了插入的项，所以原有的项已经向后移动了 count 位
+                        // 例如：原 index=0 (A), 插入 1 个 at 0 -> [New, A]
+                        // activeItems[0] (A) -> move to 1. oldKey=0, count=1. target=1.
+                        // dataSource[1] is A.
+                        if (oldKey + count < dataSource.Count)
+                        {
+                            var data = dataSource[oldKey + count].Data;
+                            scrollItem.SetData(data, oldKey + count);
+                        }
+                    }
+                }
+
+                // 更新后续项的索引
+                for (int i = index + count; i < dataSource.Count; i++)
+                {
+                    dataSource[i].Index = i;
+                }
+
+                RefreshLayout();
+
+                // 结束批量处理
+                isBatchProcessing = false;
+                batchInsertIndex = -1;
+                batchInsertCount = 0;
+            }
+        }
+
+        /// <summary>
+        /// 批量移除数据项
+        /// </summary>
+        /// <param name="index">移除起始位置</param>
+        /// <param name="count">移除数量</param>
+        public void RemoveItems(int index, int count)
+        {
+            if (index < 0 || count <= 0 || index + count > dataSource.Count)
+                return;
+
+            // 标记开始批量处理
+            isBatchProcessing = true;
+
+            // 回收被移除范围内的项
+            // 计算收起动画的目标位置（Header 底部）
+            Vector2 targetPos = Vector2.zero;
+            if (enableAnimation && count > 0)
+            {
+                targetPos = GetGroupOrigin(index);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int removeIndex = index + i;
+                if (activeItems.TryGetValue(removeIndex, out GameObject item))
+                {
+                    // 只有在启用动画时才播放移除动画
+                    if (enableAnimation)
+                    {
+                        activeItems.Remove(removeIndex);
+                        StartCoroutine(AnimateRemove(item, targetPos));
+                    }
+                    else
+                    {
+                        ReturnItemToPool(removeIndex);
+                    }
+                }
+            }
+
+            dataSource.RemoveRange(index, count);
+
+            // 调整 activeItems 的 Key 以匹配新索引
+            // 从前往后遍历
+            var keysToMove = activeItems.Keys.Where(k => k >= index + count).OrderBy(k => k).ToList();
+            foreach (var oldKey in keysToMove)
+            {
+                var item = activeItems[oldKey];
+                activeItems.Remove(oldKey);
+                activeItems.Add(oldKey - count, item);
+
+                // 更新 Item 组件的索引
+                var scrollItem = item.GetComponent<ScrollViewItemBase>();
+                if (scrollItem != null)
+                {
+                    if (oldKey - count >= 0 && oldKey - count < dataSource.Count)
+                    {
+                        var data = dataSource[oldKey - count].Data;
+                        scrollItem.SetData(data, oldKey - count);
+                    }
+                }
+            }
+
+            // 更新后续项的索引
+            for (int i = index; i < dataSource.Count; i++)
+            {
+                dataSource[i].Index = i;
+            }
+
+            RefreshLayout();
+
+            // 结束批量处理
+            isBatchProcessing = false;
         }
 
         /// <summary>
@@ -673,14 +879,26 @@ namespace UGC.InfiniteScrollView
             if (layoutManager == null)
                 return;
 
+            int requiredCount = dataSource.Count;
+            if (requiredCount == 0)
+            {
+                ClearAllItems();
+                return;
+            }
+
+            // 计算布局
             layoutManager.CalculateLayout(dataSource, itemSpacing, padding);
 
-            // 在创建/更新可见项前，确保对象池容量充足
-            var initialRange = layoutManager.GetVisibleRange(content.anchoredPosition, preloadDistance);
-            int requiredCount = (initialRange.firstIndex >= 0 && initialRange.lastIndex >= initialRange.firstIndex)
-                ? (initialRange.lastIndex - initialRange.firstIndex + 1)
-                : Mathf.Min(maxVisibleItems, dataSource.Count);
+            // 更新内容区域大小
+            Vector2 contentSize = layoutManager.ContentSize;
+            content.sizeDelta = contentSize;
+
+            // 确保对象池足够大
             EnsurePoolCapacity(requiredCount);
+
+            // 强制重置可见索引，确保 UpdateVirtualization 总是触发 UpdateVisibleItems
+            firstVisibleIndex = -1;
+            lastVisibleIndex = -1;
 
             if (enableVirtualization)
             {
@@ -698,16 +916,22 @@ namespace UGC.InfiniteScrollView
         public void ClearPool()
         {
             ClearAllItems();
-            itemPool?.Clear();
+            if (itemPools != null)
+            {
+                foreach (var pool in itemPools.Values)
+                {
+                    pool.Clear();
+                }
+            }
         }
 
         #endregion
 
         #region 私有方法
 
-        private GameObject CreatePoolItem()
+        private GameObject CreatePoolItem(int type, GameObject prefab)
         {
-            GameObject item = Instantiate(itemPrefab, content);
+            GameObject item = Instantiate(prefab, content);
             item.SetActive(false);
 
             // 设置锚点为左上角，确保位置计算正确
@@ -717,11 +941,18 @@ namespace UGC.InfiniteScrollView
                 itemRect.pivot = new Vector2(0, 1);     // 轴心点也设为左上角
 
                 // 保持预制体的原始大小
-                RectTransform prefabRect = itemPrefab.GetComponent<RectTransform>();
+                RectTransform prefabRect = prefab.GetComponent<RectTransform>();
                 if (prefabRect != null)
                 {
                     itemRect.sizeDelta = prefabRect.sizeDelta;
                 }
+            }
+
+            // 设置类型
+            var scrollItem = item.GetComponent<ScrollViewItemBase>();
+            if (scrollItem != null)
+            {
+                scrollItem.ItemType = type;
             }
 
             return item;
@@ -768,6 +999,16 @@ namespace UGC.InfiniteScrollView
 
         private void UpdateVisibleItems(int firstIndex, int lastIndex)
         {
+            // 记录旧的位置信息用于动画
+            var oldPositions = new Dictionary<int, Vector2>();
+            if (enableAnimation)
+            {
+                foreach (var kvp in activeItems)
+                {
+                    oldPositions[kvp.Key] = kvp.Value.GetComponent<RectTransform>().anchoredPosition;
+                }
+            }
+
             // 回收不再可见的项
             var itemsToRemove = new List<int>();
             foreach (var kvp in activeItems)
@@ -789,6 +1030,65 @@ namespace UGC.InfiniteScrollView
                 if (i >= 0 && i < dataSource.Count && !activeItems.ContainsKey(i))
                 {
                     CreateItemAtIndex(i);
+
+                    // 新创建的项如果有动画需求
+                    if (enableAnimation && isBatchProcessing)
+                    {
+                        var item = activeItems[i];
+                        if (item != null)
+                        {
+                            // 检查这是否是一个新插入的项（即不在旧位置记录中）
+                            if (!oldPositions.ContainsKey(i))
+                            {
+                                // 检查是否在当前批量插入范围内
+                                if (i >= batchInsertIndex && i < batchInsertIndex + batchInsertCount)
+                                {
+                                    // 从 Header 底部滑出
+                                    Vector2 origin = GetGroupOrigin(batchInsertIndex);
+                                    Vector2 target = layoutManager.GetItemPosition(i);
+                                    StartCoroutine(AnimateInsert(item.GetComponent<RectTransform>(), origin, target));
+                                }
+                                else
+                                {
+                                    // 其他新项（可能是预加载出来的），使用默认淡入
+                                    // StartCoroutine(AnimateFadeIn(item)); 
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (activeItems.ContainsKey(i))
+                {
+                    // 已存在的项，更新位置
+                    var item = activeItems[i];
+                    var rect = item.GetComponent<RectTransform>();
+                    Vector2 newPos = layoutManager.GetItemPosition(i);
+
+                    if (enableAnimation)
+                    {
+                        if (oldPositions.TryGetValue(i, out Vector2 oldPos))
+                        {
+                            if (Vector2.Distance(oldPos, newPos) > 1f)
+                            {
+                                // 暂时恢复旧位置，然后动画移动到新位置
+                                rect.anchoredPosition = oldPos;
+                                StartCoroutine(AnimateItemMove(rect, newPos));
+                            }
+                            else
+                            {
+                                rect.anchoredPosition = newPos;
+                            }
+                        }
+                        else
+                        {
+                            // 理论上不会发生，除非 oldPositions 没记录到
+                            rect.anchoredPosition = newPos;
+                        }
+                    }
+                    else
+                    {
+                        rect.anchoredPosition = newPos;
+                    }
                 }
             }
 
@@ -796,12 +1096,155 @@ namespace UGC.InfiniteScrollView
             EnsureStableSiblingOrder(firstIndex, lastIndex);
         }
 
+        private System.Collections.IEnumerator AnimateItemMove(RectTransform itemRect, Vector2 targetPos)
+        {
+            float duration = 0.3f;
+            float elapsed = 0f;
+            Vector2 startPos = itemRect.anchoredPosition;
+
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = elapsed / duration;
+                t = t * t * (3f - 2f * t);
+
+                if (itemRect != null)
+                {
+                    itemRect.anchoredPosition = Vector2.Lerp(startPos, targetPos, t);
+                }
+                yield return null;
+            }
+
+            if (itemRect != null)
+            {
+                itemRect.anchoredPosition = targetPos;
+            }
+        }
+
+        private System.Collections.IEnumerator AnimateInsert(RectTransform itemRect, Vector2 originPos, Vector2 targetPos)
+        {
+            if (itemRect == null) yield break;
+
+            float duration = 0.3f;
+            float elapsed = 0f;
+
+            // 初始状态
+            itemRect.anchoredPosition = originPos;
+
+            CanvasGroup canvasGroup = itemRect.GetComponent<CanvasGroup>();
+            if (canvasGroup != null) canvasGroup.alpha = 0f;
+
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / duration);
+                // 缓动
+                t = t * t * (3f - 2f * t);
+
+                if (itemRect != null)
+                {
+                    itemRect.anchoredPosition = Vector2.Lerp(originPos, targetPos, t);
+                    if (canvasGroup != null) canvasGroup.alpha = t;
+                }
+                yield return null;
+            }
+
+            if (itemRect != null)
+            {
+                itemRect.anchoredPosition = targetPos;
+                if (canvasGroup != null) canvasGroup.alpha = 1f;
+            }
+        }
+
+        private System.Collections.IEnumerator AnimateRemove(GameObject item, Vector2 targetPos)
+        {
+            if (item == null) yield break;
+
+            RectTransform itemRect = item.GetComponent<RectTransform>();
+            if (itemRect == null)
+            {
+                RecycleItem(item);
+                yield break;
+            }
+
+            float duration = 0.25f; // 移除稍快一点
+            float elapsed = 0f;
+            Vector2 startPos = itemRect.anchoredPosition;
+
+            CanvasGroup canvasGroup = item.GetComponent<CanvasGroup>();
+
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / duration);
+
+                if (item != null)
+                {
+                    itemRect.anchoredPosition = Vector2.Lerp(startPos, targetPos, t);
+                    if (canvasGroup != null) canvasGroup.alpha = 1f - t;
+                }
+                yield return null;
+            }
+
+            if (item != null)
+            {
+                // 恢复状态以便下次使用
+                if (canvasGroup != null) canvasGroup.alpha = 1f;
+
+                RecycleItem(item);
+            }
+        }
+
+        [Header("动画设置")]
+        [SerializeField] private bool enableAnimation = true;
+
+        private bool isBatchProcessing = false;
+        private int batchInsertIndex = -1;
+        private int batchInsertCount = 0;
+
+        private Vector2 GetGroupOrigin(int firstItemIndex)
+        {
+            if (firstItemIndex <= 0) return Vector2.zero;
+
+            // 获取前一个项（Header）的位置和大小
+            // 注意：此时 LayoutManager 已经更新，但我们想要的是Header的位置
+            // Header 的索引是 firstItemIndex - 1
+            int headerIndex = firstItemIndex - 1;
+
+            // 简单处理：获取Header的底部位置作为起点
+            // 这里假设是垂直布局，向下增长
+            Vector2 pos = layoutManager.GetItemPosition(headerIndex);
+            Vector2 size = layoutManager.GetItemSize(headerIndex);
+
+            if (layoutType == LayoutType.Vertical)
+            {
+                return pos + new Vector2(0, -size.y);
+            }
+            else if (layoutType == LayoutType.Horizontal)
+            {
+                return pos + new Vector2(size.x, 0);
+            }
+
+            // 网格或其他布局，暂时返回 Header 位置
+            return pos;
+        }
+
         private void CreateItemAtIndex(int index)
         {
             if (index < 0 || index >= dataSource.Count)
                 return;
 
-            GameObject item = itemPool.Borrow();
+            // 获取项类型
+            int itemType = OnGetItemType?.Invoke(index) ?? 0;
+
+            if (!itemPools.TryGetValue(itemType, out var pool))
+            {
+                // 如果没有找到对应类型的池，使用默认池
+                if (!itemPools.TryGetValue(0, out pool))
+                    return;
+            }
+
+            GameObject item = pool.Borrow();
             if (item == null)
                 return;
 
@@ -824,8 +1267,8 @@ namespace UGC.InfiniteScrollView
                 scrollItem.ResetItem();
 
                 // 设置新的数据和索引
-                scrollItem.SetData(dataSource[index].Data, index);
                 scrollItem.SetScrollView(this);
+                scrollItem.SetData(dataSource[index].Data, index);
 
                 // 根据状态管理器恢复该索引位置应有的状态
                 if (stateManager != null)
@@ -847,12 +1290,35 @@ namespace UGC.InfiniteScrollView
             activeItems[index] = item;
         }
 
+        private void RecycleItem(GameObject item)
+        {
+            int itemType = 0;
+            var scrollItem = item.GetComponent<ScrollViewItemBase>();
+            if (scrollItem != null)
+            {
+                itemType = scrollItem.ItemType;
+            }
+
+            if (itemPools != null && itemPools.TryGetValue(itemType, out var pool))
+            {
+                pool.Return(item);
+            }
+            else if (itemPools != null && itemPools.TryGetValue(0, out var defaultPool))
+            {
+                defaultPool.Return(item);
+            }
+            else
+            {
+                Destroy(item);
+            }
+        }
+
         private void ReturnItemToPool(int index)
         {
             if (activeItems.TryGetValue(index, out GameObject item))
             {
                 activeItems.Remove(index);
-                itemPool.Return(item);
+                RecycleItem(item);
             }
         }
 
@@ -873,7 +1339,26 @@ namespace UGC.InfiniteScrollView
         {
             foreach (var kvp in activeItems)
             {
-                itemPool.Return(kvp.Value);
+                GameObject item = kvp.Value;
+                int itemType = 0;
+                var scrollItem = item.GetComponent<ScrollViewItemBase>();
+                if (scrollItem != null)
+                {
+                    itemType = scrollItem.ItemType;
+                }
+
+                if (itemPools != null && itemPools.TryGetValue(itemType, out var pool))
+                {
+                    pool.Return(item);
+                }
+                else if (itemPools != null && itemPools.TryGetValue(0, out var defaultPool))
+                {
+                    defaultPool.Return(item);
+                }
+                else
+                {
+                    Destroy(item);
+                }
             }
             activeItems.Clear();
 
@@ -973,31 +1458,46 @@ namespace UGC.InfiniteScrollView
 
         private void EnsurePoolCapacity(int requiredCount)
         {
-            if (itemPool == null)
+            if (itemPools == null)
                 return;
-            
+
             // 期望容量：所需数量 + 小缓冲
             int desired = Mathf.Max(poolSize, requiredCount + 4);
-            if (itemPool.MaxSize < desired)
+
+            // 检查是否需要扩容
+            bool needResize = false;
+            foreach (var pool in itemPools.Values)
+            {
+                if (pool.MaxSize < desired)
+                {
+                    needResize = true;
+                    break;
+                }
+            }
+
+            if (needResize)
             {
                 // 扩容：清理现有项并重建对象池
                 ClearAllItems();
-                itemPool.Clear();
+
+                // 清理旧池
+                foreach (var pool in itemPools.Values)
+                {
+                    pool.Clear();
+                }
+
                 poolSize = desired;
-                itemPool = new ObjectPool<GameObject>(
-                    () => CreatePoolItem(),
-                    item => OnItemReturned(item),
-                    item => OnItemBorrowed(item),
-                    poolSize
-                );
+
+                // 重新初始化
+                InitializeObjectPool();
             }
         }
-        
+
         private void EnsureStableSiblingOrder(int firstIndex, int lastIndex)
         {
             if (firstIndex < 0 || lastIndex < firstIndex)
                 return;
-            
+
             int sibling = 0;
             for (int i = firstIndex; i <= lastIndex; i++)
             {
